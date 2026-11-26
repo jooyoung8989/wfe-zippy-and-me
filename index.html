@@ -464,15 +464,73 @@ function epStore(n){
 
 const S = { ep: store.lastEp, loaded:{}, stop:null, cleared:new Set(), tries:0, resumePoint:0 };
 
-/* Videos served from this page's own folder. They are linked automatically,
-   so opening the link is enough — no folder picking on the pad. */
-const WEB = { 1: './zippy1.mp4', 2: './zippy2.mp4', 3: './zippy3.mp4' };
-function webRec(n){ return { url: WEB[n], name: 'zippy' + n + '.mp4', web: true }; }
+/* ---------------- web videos ----------------
+   The films are served next to this page, so opening the link is enough.
+   GitHub refuses files of 100 MB or more, so each episode is stored as a few
+   parts (25~45 MiB each); they play back to back as one film and the quiz
+   times stay absolute. d = that part's exact length in seconds. */
+const WEB_PARTS = {
+  1: [ { f: './zippy1-1.mp4', d: 1160.25 }, { f: './zippy1-2.mp4', d: 1148.08 } ],
+  2: [ { f: './zippy2-1.mp4', d: 741.04 }, { f: './zippy2-2.mp4', d: 747.33 }, { f: './zippy2-3.mp4', d: 707.01 } ],
+  3: [ { f: './zippy3-1.mp4', d: 960.63 }, { f: './zippy3-2.mp4', d: 961.84 }, { f: './zippy3-3.mp4', d: 942.38 } ]
+};
+function webRec(n){
+  return { parts: WEB_PARTS[n].map(p => ({ url: p.f, dur: p.d })), name: 'zippy' + n + '.mp4', web: true };
+}
 function attachWebAll(){
   Object.keys(EPISODES).forEach(k => {
     const n = +k;
-    if (!S.loaded[n] && WEB[n]) S.loaded[n] = webRec(n);
+    if (!S.loaded[n] && WEB_PARTS[n]) S.loaded[n] = webRec(n);
   });
+}
+
+/* ---------------- part player ----------------
+   M.idx is the part being played, M.off[i] the film time where part i starts. */
+const M = { idx: 0, off: [0] };
+function partList(rec){ return rec && rec.parts && rec.parts.length ? rec.parts : null; }
+function partOffsets(rec){
+  const parts = partList(rec);
+  if (!parts) return [0];
+  const offs = [0];
+  for (let i = 1; i < parts.length; i++) offs.push(offs[i - 1] + (parts[i - 1].dur || 0));
+  return offs;
+}
+function partAt(rec, t){
+  const offs = M.off;
+  let i = 0;
+  for (let k = 0; k < offs.length; k++) if (t >= offs[k]) i = k;
+  return i;
+}
+function mediaTime(){
+  const parts = partList(S.loaded[S.ep]);
+  if (parts) return (M.off[M.idx] || 0) + (video.currentTime || 0);
+  return video.currentTime || 0;
+}
+function mediaTotal(){
+  const rec = S.loaded[S.ep];
+  const parts = partList(rec);
+  if (parts) return parts.reduce((a, p) => a + (p.dur || 0), 0) || EPISODES[S.ep].dur || 0;
+  if (isFinite(video.duration) && video.duration > 0) return video.duration;
+  return EPISODES[S.ep].dur || 0;
+}
+function loadPart(i, local, autoplay){
+  const rec = S.loaded[S.ep];
+  if (!rec) return;
+  const parts = partList(rec);
+  const url = parts ? parts[i].url : rec.url;
+  M.idx = i;
+  const apply = () => {
+    if (local > 0.05) { try { video.currentTime = local; } catch (e) {} }
+    if (autoplay) video.play().catch(() => {});
+    paintTime();
+  };
+  if (video.getAttribute('src') !== url) {
+    video.src = url;
+    video.load();
+    video.addEventListener('loadedmetadata', apply, { once: true });
+  } else {
+    apply();
+  }
 }
 
 /* ---------------- sound ---------------- */
@@ -610,7 +668,7 @@ function selectEp(n, opts){
 
 function loadEpisodeMedia(autoplay){
   let rec = S.loaded[S.ep];
-  if (!rec && WEB[S.ep]) rec = S.loaded[S.ep] = webRec(S.ep);
+  if (!rec && WEB_PARTS[S.ep]) rec = S.loaded[S.ep] = webRec(S.ep);
   closeQuiz();
   S.stop = null;
   $('chipCh').textContent = '1 · ' + EPISODES[S.ep].chapters[0].name;
@@ -624,8 +682,8 @@ function loadEpisodeMedia(autoplay){
   }
   stage.classList.remove('empty');
   $('cover').classList.add('hide');
-  video.src = rec.url;
-  video.load();
+  $('coverTitle').textContent = "Let's watch Zippy and Me";
+  M.off = partOffsets(rec);
   const es = epStore(S.ep);
   const last = es.lastTime;
   if (last > 25) {
@@ -633,6 +691,7 @@ function loadEpisodeMedia(autoplay){
     toast((store.kr ? '지난번 본 곳부터 이어 볼 수 있어요 · ' : 'Resume from ') + fmt(last));
   } else S.resumePoint = 0;
   if (autoplay) video.play().catch(()=>{});
+  loadPart(0, 0, autoplay);
 }
 
 /* ---------------- stars ---------------- */
@@ -759,7 +818,7 @@ $('btnSkip').onclick = () => {
 
 /* ---------------- playback watcher ---------------- */
 function watch(){
-  const t = video.currentTime, es = epStore(S.ep);
+  const t = mediaTime(), es = epStore(S.ep);
   const stops = EPISODES[S.ep].stops;
   for (let i = 0; i < stops.length; i++) {
     const s = stops[i];
@@ -774,14 +833,21 @@ video.addEventListener('timeupdate', watch);
 video.addEventListener('seeked', () => { if (!S.stop) watch(); });
 
 function seekTo(t){
-  try { video.currentTime = Math.max(0, t); } catch (e) {}
-  paintTime();
+  t = Math.max(0, t);
+  const rec = S.loaded[S.ep];
+  if (!rec) { try { video.currentTime = t; } catch (e) {} paintTime(); return; }
+  const parts = partList(rec);
+  if (!parts) { try { video.currentTime = t; } catch (e) {} paintTime(); return; }
+  const i = partAt(rec, t);
+  const local = t - M.off[i];
+  if (i === M.idx) { try { video.currentTime = local; } catch (e) {} paintTime(); }
+  else loadPart(i, local, false);
 }
 
 /* ---------------- controls ---------------- */
 const seek = $('seek');
 seek.addEventListener('input', () => {
-  const dur = video.duration || EPISODES[S.ep].dur;
+  const dur = mediaTotal();
   if (!isFinite(dur) || dur <= 0) return;
   seekTo(seek.value / 1000 * dur);
 });
@@ -834,12 +900,22 @@ video.addEventListener('error', () => {
 });
 video.addEventListener('timeupdate', () => {
   const es = epStore(S.ep);
-  if (video.currentTime > 3) { es.lastTime = video.currentTime; }
+  const t = mediaTime();
+  if (t > 3) { es.lastTime = t; }
+});
+video.addEventListener('ended', () => {
+  const rec = S.loaded[S.ep];
+  const parts = partList(rec);
+  if (parts && M.idx < parts.length - 1) {
+    closeQuiz();
+    S.stop = null;
+    loadPart(M.idx + 1, 0, true);
+  }
 });
 
 function paintTime(){
-  const dur = isFinite(video.duration) && video.duration > 0 ? video.duration : (EPISODES[S.ep].dur || 0);
-  const t = video.currentTime || 0;
+  const dur = mediaTotal();
+  const t = mediaTime();
   $('tCur').textContent = fmt(t);
   $('tDur').textContent = fmt(dur);
   $('chipTime').textContent = fmt(t) + ' / ' + fmt(dur);
@@ -892,7 +968,7 @@ buildTicks();
 buildDrawer();
 paintStars();
 selectEp(S.ep, {});
-window.__zippy = { S, EPISODES, store, mapFile, attachFiles, TOTAL_STOPS, WEB, attachWebAll };
+window.__zippy = { S, EPISODES, store, mapFile, attachFiles, TOTAL_STOPS, WEB_PARTS, M, mediaTime, mediaTotal, seekTo, partOffsets };
 </script>
 </body>
 </html>
