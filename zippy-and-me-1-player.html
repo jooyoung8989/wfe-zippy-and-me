@@ -690,8 +690,9 @@ function loadEpisodeMedia(autoplay){
     S.resumePoint = last;
     toast((store.kr ? '지난번 본 곳부터 이어 볼 수 있어요 · ' : 'Resume from ') + fmt(last));
   } else S.resumePoint = 0;
-  if (autoplay) video.play().catch(()=>{});
-  loadPart(0, 0, autoplay);
+  const startAt = S.resumePoint || 0;
+  const startPart = partAt(rec, startAt);
+  loadPart(startPart, startAt - M.off[startPart], autoplay);
 }
 
 /* ---------------- stars ---------------- */
@@ -898,11 +899,15 @@ video.addEventListener('error', () => {
                    : 'AVI files do not play in the browser. Please pick the MP4 file.');
   }
 });
+let lastPosSave = 0;
 video.addEventListener('timeupdate', () => {
   const es = epStore(S.ep);
   const t = mediaTime();
-  if (t > 3) { es.lastTime = t; }
+  if (t > 3) es.lastTime = t;
+  if (Date.now() - lastPosSave > 5000) { lastPosSave = Date.now(); save(); }
 });
+window.addEventListener('pagehide', save);
+document.addEventListener('visibilitychange', () => { if (document.hidden) save(); });
 video.addEventListener('ended', () => {
   const rec = S.loaded[S.ep];
   const parts = partList(rec);
